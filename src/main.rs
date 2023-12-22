@@ -3,17 +3,16 @@
 use serde_json;
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
-use serde::{Deserialize};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{self, Read};
-// Available if you need it!
-// use serde_bencode
+use sha1::{Digest, Sha1};
 
 #[allow(dead_code)]
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize,Serialize)]
 struct TorrentInfo {
     pub length: i64,
     pub name: String,
@@ -21,6 +20,17 @@ struct TorrentInfo {
     #[serde(rename="piece length")]
     pub piece_length: i64,
     pub pieces: ByteBuf, 
+}
+
+impl TorrentInfo {
+    fn calculate_sha1_hash(&self) -> String {
+        let mut hash = Sha1::new();
+        hash.update(format!("{:?}", serde_bencode::to_bytes(self).unwrap()));
+        let result = hash.finalize();
+
+        // Return hex string
+        return result.iter().map(|byte| format!("{:02x}", byte)).collect::<String>();
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -137,15 +147,17 @@ fn main() {
     else if command == "info" {
         let torrent_file_path = PathBuf::from(&args[2]);
         let torrent_data = read_torrent_file(torrent_file_path.as_path());
-        match torrent_data {
-            Ok(buf) => {
-                match de::from_bytes::<Torrent>(&buf) {
-                    Ok(t) => println!("{:?}", t),
-                    Err(e) => panic!("{}", e)
+        let mut torrent_data: Torrent =
+            match torrent_data {
+                Ok(buf) => {
+                    match de::from_bytes::<Torrent>(&buf) {
+                        Ok(t) => t, //torrent_data = t,
+                        Err(e) => panic!("{}", e)
+                    }
                 }
-            }
-            Err(e) => panic!("{}", e)
-        }
+                Err(e) => panic!("{}", e)
+            };
+        println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.unwrap(), torrent_data.info.length, torrent_data.info.calculate_sha1_hash());
     } else {
        println!("unknown command: {}", args[1])
     }
