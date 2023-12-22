@@ -1,5 +1,9 @@
 #![allow(unused)]
+
 use serde_json;
+use serde_bencode::de;
+use serde_bytes::ByteBuf;
+use serde::{Deserialize};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::fs::File;
@@ -8,6 +12,26 @@ use std::io::{self, Read};
 // use serde_bencode
 
 #[allow(dead_code)]
+
+#[derive(Debug, Deserialize)]
+struct TorrentInfo {
+    pub length: i64,
+    pub name: String,
+    // Need this or the parse fails because the key value in the torrent file is "piece length", but serde can't find a matching key value in the struct
+    #[serde(rename="piece length")]
+    pub piece_length: i64,
+    pub pieces: ByteBuf, 
+}
+
+#[derive(Debug, Deserialize)]
+struct Torrent {
+    info: TorrentInfo,
+    #[serde(default)]
+    announce: Option<String>,
+    #[serde(rename="created by")]
+    created_by: Option<String>,
+}
+
 
 fn decode_bencoded_input(encoded_value: &str) -> (serde_json::Value, &str) {
     match encoded_value.chars().next() {
@@ -74,7 +98,7 @@ fn read_torrent_file(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = File::open(path)?;
 
     let mut contents = Vec::new();
-    file.read(&mut contents)?;
+    file.read_to_end(&mut contents)?;
     Ok(contents)
 }
 
@@ -104,8 +128,6 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let command = &args[1];
 
-
-
     if command == "decode" {
        // Uncomment this block to pass the first stage
        let encoded_value = &args[2];
@@ -115,10 +137,15 @@ fn main() {
     else if command == "info" {
         let torrent_file_path = PathBuf::from(&args[2]);
         let torrent_data = read_torrent_file(torrent_file_path.as_path());
-
-        //println!("{}", torrent_data.unwrap());
-        println!("{:?}", decode_bencoded_input(torrent_data.unwrap().as_str()).0);
-
+        match torrent_data {
+            Ok(buf) => {
+                match de::from_bytes::<Torrent>(&buf) {
+                    Ok(t) => println!("{:?}", t),
+                    Err(e) => panic!("{}", e)
+                }
+            }
+            Err(e) => panic!("{}", e)
+        }
     } else {
        println!("unknown command: {}", args[1])
     }
