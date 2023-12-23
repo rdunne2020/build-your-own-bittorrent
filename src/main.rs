@@ -31,6 +31,21 @@ impl TorrentInfo {
         // Return hex string
         return result.iter().map(|byte| format!("{:02x}", byte)).collect::<String>();
     }
+    fn print_piece_hashes(&self) -> Vec<String>{
+        // Each hash is 20 bytes
+        let hash_string_size = 20;
+        let bytes = self.pieces.to_vec();
+        let num_pieces = bytes.len() / hash_string_size;
+        let mut hash_strings: Vec<String> = Vec::new();
+        for i in 0..num_pieces {
+            let slice_start = i * 20;
+            let slice_end = 20 * (i+1);
+            let byte_slice: &[u8] = &bytes[slice_start..slice_end];
+            hash_strings.push(byte_slice.iter().map(|c| format!("{:02X}", c)).collect::<String>());
+            //println!("{:02X}", &bytes[slice_start..slice_end]);
+        }
+        hash_strings
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +173,11 @@ fn main() {
                 Err(e) => panic!("{}", e)
             };
         println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.unwrap(), torrent_data.info.length, torrent_data.info.calculate_sha1_hash());
+        println!("Piece Length: {}", torrent_data.info.piece_length);
+        println!("Piece Hashes:");
+        for i in torrent_data.info.print_piece_hashes() {
+            println!("{}", i.to_lowercase());
+        }
     } else {
        println!("unknown command: {}", args[1])
     }
