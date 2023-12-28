@@ -1,5 +1,6 @@
 #![allow(unused)]
 
+use reqwest::Response;
 use serde_json;
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
@@ -9,8 +10,27 @@ use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{self, Read};
 use sha1::{Digest, Sha1};
+use std::collections::HashMap;
 
 #[allow(dead_code)]
+
+fn urlencode_binary_data(hash: &Vec<u8>) -> String {
+    let mut encoded_string = String::with_capacity(hash.len()*3);
+    for c in hash {
+        match c {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':'| b'?'| b'['| b']'| b'@'| b'!'| b'\''| b'('| b')'| b'*'| b','| b';'| b'='=> {
+                // encoded_string.push_str(&format!("{c:02x}"));
+                encoded_string.push(*c as char);
+            }
+            _ => {
+                encoded_string.push('%');
+                encoded_string.push_str(&format!("{c:02x}"));
+            }
+        }
+    }
+    println!("Encoded String: {}", encoded_string);
+    encoded_string
+}
 
 #[derive(Debug, Deserialize,Serialize)]
 struct TorrentInfo {
@@ -25,9 +45,11 @@ struct TorrentInfo {
 impl TorrentInfo {
     fn calculate_sha1_hash(&self) -> String {
         let mut hash = Sha1::new();
-        hash.update(format!("{:?}", serde_bencode::to_bytes(self).unwrap()));
+        // hash.update(format!("{:?}", serde_bencode::to_bytes(self).unwrap()));
+        hash.update(serde_bencode::to_bytes(self).unwrap());
         let result = hash.finalize();
 
+        println!("{:?}", result);
         // Return hex string
         return result.iter().map(|byte| format!("{:02x}", byte)).collect::<String>();
     }
@@ -41,8 +63,7 @@ impl TorrentInfo {
             let slice_start = i * 20;
             let slice_end = 20 * (i+1);
             let byte_slice: &[u8] = &bytes[slice_start..slice_end];
-            hash_strings.push(byte_slice.iter().map(|c| format!("{:02X}", c)).collect::<String>());
-            //println!("{:02X}", &bytes[slice_start..slice_end]);
+            hash_strings.push(byte_slice.iter().map(|c| format!("{:02x}", c)).collect::<String>());
         }
         hash_strings
     }
@@ -55,6 +76,34 @@ struct Torrent {
     announce: Option<String>,
     #[serde(rename="created by")]
     created_by: Option<String>,
+}
+
+impl Torrent {
+    // Function to request tracker data
+    async fn get_tracker_info(&self) -> Option<Response> {
+        let num_pieces = (self.info.pieces.to_vec().len() / 20);
+        let tracker_url = self.announce.clone().unwrap();
+        // println!("URL: {}", urlencode_binary_data(&serde_bencode::to_bytes(&self.info).unwrap()));
+        // println!("Fart: {:?}", serde_urlencoded::to_string(&self.info));
+        let mut param_map = HashMap::new();
+        param_map.insert("info_hash".to_string(), urlencode_binary_data(&serde_bencode::to_bytes(&self.info).unwrap()));
+        param_map.insert("peer_id".to_string(), "1337694201337694201".to_string());
+        param_map.insert("port".to_string(), "6881".to_string());
+        param_map.insert("uploaded".to_string(), "0".to_string());
+        param_map.insert("downloaded".to_string(), "0".to_string());
+        param_map.insert("length".to_string(), (num_pieces*(self.info.piece_length as usize)).to_string());
+        param_map.insert("compact".to_string(), "1".to_string());
+
+        // Make a request to the URL to get the info about it
+        let tracker_response = reqwest::Client::new()
+                                    .get(tracker_url)
+                                    .query(&param_map)
+                                    .send()
+                                    .await;
+
+        // println!("{:?}", tracker_response);
+        Some(tracker_response.unwrap())
+    }
 }
 
 
@@ -149,7 +198,8 @@ mod tests {
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
     let command = &args[1];
 
@@ -172,12 +222,14 @@ fn main() {
                 }
                 Err(e) => panic!("{}", e)
             };
-        println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.unwrap(), torrent_data.info.length, torrent_data.info.calculate_sha1_hash());
+        println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.clone().unwrap(), torrent_data.info.length, torrent_data.info.calculate_sha1_hash());
         println!("Piece Length: {}", torrent_data.info.piece_length);
         println!("Piece Hashes:");
         for i in torrent_data.info.print_piece_hashes() {
-            println!("{}", i.to_lowercase());
+            println!("{}", i);
         }
+        // TODO: Bad Info Hash
+        println!("{:?}", torrent_data.get_tracker_info().await.unwrap().text().await);
     } else {
        println!("unknown command: {}", args[1])
     }
