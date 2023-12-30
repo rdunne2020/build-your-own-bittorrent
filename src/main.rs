@@ -1,5 +1,11 @@
 #![allow(unused)]
 
+mod torrent;
+use torrent::Torrent;
+
+mod tracker;
+use tracker::TrackerResponse;
+
 use serde_json;
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
@@ -8,55 +14,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{self, Read};
-use sha1::{Digest, Sha1};
-
-#[allow(dead_code)]
-
-#[derive(Debug, Deserialize,Serialize)]
-struct TorrentInfo {
-    pub length: i64,
-    pub name: String,
-    // Need this or the parse fails because the key value in the torrent file is "piece length", but serde can't find a matching key value in the struct
-    #[serde(rename="piece length")]
-    pub piece_length: i64,
-    pub pieces: ByteBuf, 
-}
-
-impl TorrentInfo {
-    fn calculate_sha1_hash(&self) -> String {
-        let mut hash = Sha1::new();
-        hash.update(format!("{:?}", serde_bencode::to_bytes(self).unwrap()));
-        let result = hash.finalize();
-
-        // Return hex string
-        return result.iter().map(|byte| format!("{:02x}", byte)).collect::<String>();
-    }
-    fn print_piece_hashes(&self) -> Vec<String>{
-        // Each hash is 20 bytes
-        let hash_string_size = 20;
-        let bytes = self.pieces.to_vec();
-        let num_pieces = bytes.len() / hash_string_size;
-        let mut hash_strings: Vec<String> = Vec::new();
-        for i in 0..num_pieces {
-            let slice_start = i * 20;
-            let slice_end = 20 * (i+1);
-            let byte_slice: &[u8] = &bytes[slice_start..slice_end];
-            hash_strings.push(byte_slice.iter().map(|c| format!("{:02X}", c)).collect::<String>());
-            //println!("{:02X}", &bytes[slice_start..slice_end]);
-        }
-        hash_strings
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct Torrent {
-    info: TorrentInfo,
-    #[serde(default)]
-    announce: Option<String>,
-    #[serde(rename="created by")]
-    created_by: Option<String>,
-}
-
 
 fn decode_bencoded_input(encoded_value: &str) -> (serde_json::Value, &str) {
     match encoded_value.chars().next() {
@@ -149,7 +106,8 @@ mod tests {
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().collect();
     let command = &args[1];
 
@@ -172,11 +130,31 @@ fn main() {
                 }
                 Err(e) => panic!("{}", e)
             };
-        println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.unwrap(), torrent_data.info.length, torrent_data.info.calculate_sha1_hash());
+        println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.clone().unwrap(), torrent_data.info.length, torrent_data.info.calculate_sha1_hash().1);
         println!("Piece Length: {}", torrent_data.info.piece_length);
         println!("Piece Hashes:");
         for i in torrent_data.info.print_piece_hashes() {
-            println!("{}", i.to_lowercase());
+            println!("{}", i);
+        }
+    }
+    else if command == "peers" {
+       // Uncomment this block to pass the first stage
+        let torrent_file_path = PathBuf::from(&args[2]);
+        let torrent_data = read_torrent_file(torrent_file_path.as_path());
+        let mut torrent_data: Torrent =
+            match torrent_data {
+                Ok(buf) => {
+                    match de::from_bytes::<Torrent>(&buf) {
+                        Ok(t) => t, //torrent_data = t,
+                        Err(e) => panic!("{}", e)
+                    }
+                }
+                Err(e) => panic!("{}", e)
+            };
+        let bin_data = torrent_data.get_tracker_info().await.unwrap().bytes().await.unwrap();
+        let decoded_data: TrackerResponse = serde_bencode::from_bytes(bin_data.as_ref()).unwrap(); 
+        for ip in decoded_data.get_peers() {
+            println!("{}", ip);
         }
     } else {
        println!("unknown command: {}", args[1])
