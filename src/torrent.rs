@@ -33,7 +33,7 @@ pub struct TorrentInfo {
 }
 
 impl TorrentInfo {
-    pub fn calculate_sha1_hash(&self) -> (String,String) {
+    pub fn calculate_sha1_hash(&self) -> (String,Vec<u8>) {
         let mut hash = Sha1::new();
         hash.update(serde_bencode::to_bytes(self).unwrap());
         let result = hash.finalize();
@@ -44,8 +44,18 @@ impl TorrentInfo {
         let urlencoded_string = urlencode_binary_data(&hashed_bytes);
 
         // Return hex string
-        return (urlencoded_string, hex::encode(result));
+        return (urlencoded_string, hashed_bytes);
 
+    }
+
+    pub fn print_info_hash_hex(&self) -> String {
+        let mut hash = Sha1::new();
+        hash.update(serde_bencode::to_bytes(self).unwrap());
+        let result = hash.finalize();
+
+        let hashed_bytes: Vec<u8> = result.to_vec();
+
+        hex::encode(result)
     }
 
     pub fn print_piece_hashes(&self) -> Vec<String>{

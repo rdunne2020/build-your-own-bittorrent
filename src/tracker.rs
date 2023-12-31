@@ -39,3 +39,45 @@ impl TrackerResponse {
         peers
     }
 }
+
+pub struct HandshakeMessage {
+    pub length: u8,
+    pub protocol: String,
+    pub zeros: [u8; 8],
+    pub info_hash: [u8; 20],
+    pub peer_id: String,
+}
+
+impl HandshakeMessage {
+    pub fn new(hash: [u8; 20]) -> Self {
+        HandshakeMessage {
+            length: 19,
+            protocol: String::from("BitTorrent protocol"),
+            zeros: [0; 8],
+            info_hash: hash,
+            peer_id: String::from("13376942013376942069")
+        }
+    }
+    pub fn get_message_bytes(&self) -> [u8; 68] {
+        let protocol_string_to_bytes = self.protocol.as_bytes();
+        let peer_id_to_bytes = self.peer_id.as_bytes();
+
+        let mut message_byte_vec: Vec<u8> = Vec::new();
+        message_byte_vec.push(self.length);
+        message_byte_vec.append(&mut protocol_string_to_bytes.to_owned());
+        for b in self.zeros {
+            message_byte_vec.push(b);
+        }
+        for b in self.info_hash {
+            message_byte_vec.push(b)
+        }
+
+        message_byte_vec.append(&mut peer_id_to_bytes.to_owned());
+        let byte_array: [u8; 68] = {
+            let mut arr = [0; 68]; // Initialize an array of zeros
+            arr.copy_from_slice(&message_byte_vec.as_slice()[..68]); // Copy data from slice to array
+            arr
+        };
+        byte_array
+    }
+}

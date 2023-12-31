@@ -5,6 +5,7 @@ use torrent::Torrent;
 
 mod tracker;
 use tracker::TrackerResponse;
+use tracker::HandshakeMessage;
 
 use serde_json;
 use serde_bencode::de;
@@ -13,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
+use std::net::SocketAddrV4;
+use std::str::FromStr;
+use std::net::TcpStream;
 
 fn decode_bencoded_input(encoded_value: &str) -> (serde_json::Value, &str) {
     match encoded_value.chars().next() {
@@ -130,7 +134,7 @@ async fn main() {
                 }
                 Err(e) => panic!("{}", e)
             };
-        println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.clone().unwrap(), torrent_data.info.length, torrent_data.info.calculate_sha1_hash().1);
+        println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.clone().unwrap(), torrent_data.info.length, torrent_data.info.print_info_hash_hex());
         println!("Piece Length: {}", torrent_data.info.piece_length);
         println!("Piece Hashes:");
         for i in torrent_data.info.print_piece_hashes() {
@@ -156,7 +160,45 @@ async fn main() {
         for ip in decoded_data.get_peers() {
             println!("{}", ip);
         }
-    } else {
+    }
+    else if command == "handshake" {
+        let torrent_file_path = PathBuf::from(&args[2]);
+        let torrent_data = read_torrent_file(torrent_file_path.as_path());
+        let mut torrent_data: Torrent =
+            match torrent_data {
+                Ok(buf) => {
+                    match serde_bencode::de::from_bytes::<Torrent>(&buf) {
+                        Ok(t) => t, //torrent_data = t,
+                        Err(e) => panic!("{}", e)
+                    }
+                }
+                Err(e) => panic!("{}", e)
+            };
+        let socket_str = &args[3];
+        let socket_obj = SocketAddrV4::from_str(&socket_str.as_str());
+        match socket_obj {
+            Ok(sock) => {
+                let info_hash = torrent_data.info.calculate_sha1_hash().1;
+                let byte_array: [u8; 20] = {
+                    let mut arr = [0; 20]; // Initialize an array of zeros
+                    arr.copy_from_slice(&info_hash.as_slice()[..20]); // Copy data from slice to array
+                    arr
+                };
+                let handshake_msg: HandshakeMessage = HandshakeMessage::new(byte_array);
+                // Create the TCP Stream
+                let mut stream = TcpStream::connect(sock).expect(format!("Could Not Initiate Connection to {:?}", sock).as_str());
+                stream.write_all(&handshake_msg.get_message_bytes());
+
+                let mut response_container: [u8; 68] = [0; 68];
+                stream.read_exact(&mut response_container);
+
+                let peer_id = response_container[48..68].to_owned();
+                println!("Peer ID: {}", hex::encode(peer_id))
+            },
+            Err(e) => println!("{:?}", e) 
+        };
+    } 
+    else {
        println!("unknown command: {}", args[1])
     }
 }
