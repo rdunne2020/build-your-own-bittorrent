@@ -6,15 +6,49 @@ use std::net::{SocketAddrV4, TcpStream};
 use std::io::{Write, Read};
 use std::str::FromStr;
 use std::io::{Error, ErrorKind};
+use std::convert::From;
+
+#[repr(u8)]
+#[derive(Copy, Clone)]
+pub enum MessageId {
+    Choke = 0,
+    Unchoke = 1,
+    Interested = 2,
+    NotInterested = 3,
+    Have = 4,
+    Bitfield = 5,
+    Request = 6,
+    Piece = 7,
+    Cancel = 8,
+    Port = 9
+}
+
+impl From<u8> for MessageId {
+    fn from(id: u8) -> Self {
+        match id {
+            0 => MessageId::Choke,
+            1 => MessageId::Unchoke,
+            2 => MessageId::Interested,
+            3 => MessageId::NotInterested,
+            4 => MessageId::Have,
+            5 => MessageId::Bitfield,
+            6 => MessageId::Request,
+            7 => MessageId::Piece,
+            8 => MessageId::Cancel,
+            9 => MessageId::Port,
+            _ => MessageId::Choke
+        }
+    }
+}
 
 pub struct PeerMessage {
     pub length: u32,
-    pub message_id: u8,
+    pub message_id: MessageId,
     pub payload: Vec<u8>
 }
 
 impl PeerMessage {
-    pub fn new(length: u32, id: u8, data: &Vec<u8>) -> Self {
+    pub fn new(length: u32, id: MessageId, data: &Vec<u8>) -> Self {
         PeerMessage {
             length,
             message_id: id,
@@ -26,7 +60,7 @@ impl PeerMessage {
         let mut length_bytes: [u8; 4] = self.length.to_be_bytes();
 
         byte_vector.extend_from_slice(&length_bytes);
-        byte_vector.push(self.message_id);
+        byte_vector.push(self.message_id as u8);
         byte_vector.append(&mut self.payload.clone());
 
         byte_vector
@@ -103,7 +137,7 @@ impl PeerDownloader {
         // Return the message
         PeerMessage {
             length: message_len,
-            message_id: msg_id,
+            message_id: MessageId::from(msg_id),
             payload
         }
     }
@@ -121,6 +155,37 @@ impl PeerDownloader {
         }
     }
 
+    pub fn download_chunk(&mut self, piece_index: u32, chunk_offset: u32, chunk_size: u32) -> Option<Vec<u8>> {
+        const REQUEST_MSG_ID: MessageId = MessageId::Request;
+        const REQUEST_MSG_LEN: u32 = 13;
+
+        println!("Downloading Chunk: {}", chunk_offset / chunk_size);
+
+        let mut request_message_byte_array: Vec<u8> = Vec::new();
+        let mut request_payload: Vec<u8> = Vec::new();
+        let mut index_byte_array: [u8; 4] = piece_index.to_be_bytes();
+        let mut begin_byte_array: [u8; 4] = chunk_offset.to_be_bytes();
+        let mut length_byte_array: [u8; 4] = chunk_size.to_be_bytes();
+
+        request_payload.extend_from_slice(&index_byte_array);
+        request_payload.extend_from_slice(&begin_byte_array);
+        request_payload.extend_from_slice(&length_byte_array);
+
+        request_message_byte_array= PeerMessage::new(REQUEST_MSG_LEN, REQUEST_MSG_ID, &request_payload).get_message_bytes();
+
+        if let Ok(()) = self.tcp_stream.write_all(&mut request_message_byte_array) {
+            // The piece payload has 2 u32 values: index, and begin, before the actual chunk data that we have to trim out
+            let mut chunk_data = self.read_peer_message();
+            // Drain the first 8 bytes
+            let block: Vec<u8> = chunk_data.payload.drain(8..).into_iter().collect();
+            println!("Downloaded Chunk: {}", chunk_offset / chunk_size);
+            Some(block)
+        }
+        else {
+            None
+        }
+    }
+
     // TODO: Pipeline this (async)
     pub fn download_piece(&mut self, piece_index: u32, piece_size: usize, chunk_size: usize) -> Vec<u8> {
         // Calculate how many chunks we have to download
@@ -132,36 +197,25 @@ impl PeerDownloader {
 
         let mut piece_data: Vec<u8> = Vec::new();
         let mut downloaded_bytes: usize = 0;
-        let mut index_byte_array: [u8; 4] = piece_index.to_be_bytes();
+        let mut final_chunk_size:usize = usize::MAX;
         for i in 0..total_chunks {
-            let mut request_message_byte_array: Vec<u8> = Vec::new();
-            // Make sure you still have enough data in the piece to download a whole chunk
-            if downloaded_bytes + chunk_size < piece_size {
-                let starting_offset: u32 = i as u32 * chunk_size as u32;
-                let mut request_payload: Vec<u8> = Vec::new();
-                let mut begin_byte_array: [u8; 4] = starting_offset.to_be_bytes();
-                let mut length_byte_array: [u8; 4] = (chunk_size as u32).to_be_bytes();
-                request_payload.extend_from_slice(&index_byte_array);
-                request_payload.extend_from_slice(&begin_byte_array);
-                request_payload.extend_from_slice(&length_byte_array);
-                request_message_byte_array= PeerMessage::new(13, 6, &request_payload).get_message_bytes();
+            let starting_offset: u32 = i as u32 * chunk_size as u32;
+            // Make sure you still have enough data in the piece to download a whole chunk by checking to see
+            // if the next full chunk size download will be more bytes than are available
+            if downloaded_bytes + chunk_size > piece_size {
+                final_chunk_size = (chunk_size - (piece_size - downloaded_bytes));
             }
-            // This branch is only hit on the last chunk
-            else {
-                let final_chunk_size: u32 = (chunk_size - (piece_size - downloaded_bytes)) as u32;
-                let starting_offset: u32 = i as u32 * chunk_size as u32;
-                let mut request_payload: Vec<u8> = Vec::new();
-                let mut begin_byte_array: [u8; 4] = starting_offset.to_be_bytes();
-                let mut length_byte_array: [u8; 4] = final_chunk_size.to_be_bytes();
-                request_payload.extend_from_slice(&index_byte_array);
-                request_payload.extend_from_slice(&begin_byte_array);
-                request_payload.extend_from_slice(&length_byte_array);
-                request_message_byte_array= PeerMessage::new(13, 6, &request_payload).get_message_bytes();
+
+            // If we're not downloading the last chunk, final chunk size will be usize max
+            // so we set it to the default chunk size and pass that to the downloader
+            if final_chunk_size > chunk_size {
+                final_chunk_size = chunk_size;
             }
-            if let Ok(()) = self.tcp_stream.write_all(&mut request_message_byte_array) {
-                let mut chunk_data = self.read_peer_message();
+            if let Some(mut chunk_data) = self.download_chunk(piece_index, starting_offset, final_chunk_size as u32) {
+                // Update downloaded_bytes
+                downloaded_bytes += chunk_data.len();
                 // Store the payload data into our final vector
-                piece_data.append(&mut chunk_data.payload);
+                piece_data.append(&mut chunk_data);
 
             }
             // Sending request failed

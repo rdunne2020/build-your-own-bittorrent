@@ -167,7 +167,7 @@ async fn main() {
 
                 let interested_message: PeerMessage = PeerMessage {
                     length: 1,
-                    message_id: 2,
+                    message_id: downloads::MessageId::from(2),
                     payload: vec![]
                 };
                 // Unchoke downloader
@@ -178,7 +178,7 @@ async fn main() {
                 let unchoke_message = dl_helper.read_peer_message();
                 // Once the unchoke message is received we can start requesting data
                 dl_helper.peer_status = downloads::PeerStatus::PeerInterested;
-                println!("{}", unchoke_message.message_id);
+                println!("{}", unchoke_message.message_id as u8);
                 // Download 16k chunks (16384 bytes)
                 let piece = dl_helper.download_piece(piecenum, torrent_data.info.piece_length as usize, 16384);
                 println!("Downloaded piece of length: {}", piece.len());
