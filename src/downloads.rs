@@ -119,7 +119,7 @@ impl PeerDownloader {
     }
 
     // TODO: Make this an Option, need better error handling in general
-    pub fn read_peer_message(&mut self) -> PeerMessage{
+    pub fn read_peer_message(&mut self) -> Result<PeerMessage,std::io::Error>{
         // Read in the first 4 bytes to get message length
         let mut received_message_length: [u8; 4] = [0; 4];
         self.tcp_stream.read_exact(&mut received_message_length);
@@ -127,25 +127,31 @@ impl PeerDownloader {
         // Store length in a u32
         let message_len: u32 = u32::from_be_bytes(received_message_length);
         let mut received_message_body: Vec<u8> = vec![0; message_len as usize];
-        self.tcp_stream.read_exact(&mut received_message_body);
+        let read_status = self.tcp_stream.read_exact(&mut received_message_body);
 
-        // Now Split the first byte of the body out to get message ID, then store the rest as the body
-        let msg_id: u8 = received_message_body[0];
+        match read_status {
+            Ok(()) => {
+                let msg_id: u8 = received_message_body[0];
 
-        let payload: Vec<u8> = received_message_body.drain(1..).into_iter().collect();
+                let payload: Vec<u8> = received_message_body.drain(1..).into_iter().collect();
 
-        // Return the message
-        PeerMessage {
-            length: message_len,
-            message_id: MessageId::from(msg_id),
-            payload
+                // Return the message
+                Ok(PeerMessage {
+                    length: message_len,
+                    message_id: MessageId::from(msg_id),
+                    payload
+                })
+            },
+            Err(e) => {
+                return Err(e);
+            }
         }
+        // Now Split the first byte of the body out to get message ID, then store the rest as the body
     }
 
     pub fn send_peer_message(&mut self, peer_msg: &PeerMessage) -> Result<usize, std::io::Error> {
         let mut msg_bytes: Vec<u8> = peer_msg.get_message_bytes();
         let message_length: usize = msg_bytes.len();
-        println!("{:?}", msg_bytes);
         // Send Message
         if let Ok(()) = self.tcp_stream.write_all(&mut msg_bytes) {
             return Ok(message_length);
@@ -158,8 +164,6 @@ impl PeerDownloader {
     pub fn download_chunk(&mut self, piece_index: u32, chunk_offset: u32, chunk_size: u32) -> Option<Vec<u8>> {
         const REQUEST_MSG_ID: MessageId = MessageId::Request;
         const REQUEST_MSG_LEN: u32 = 13;
-
-        println!("Downloading Chunk: {}", chunk_offset / chunk_size);
 
         let mut request_message_byte_array: Vec<u8> = Vec::new();
         let mut request_payload: Vec<u8> = Vec::new();
@@ -175,10 +179,9 @@ impl PeerDownloader {
 
         if let Ok(()) = self.tcp_stream.write_all(&mut request_message_byte_array) {
             // The piece payload has 2 u32 values: index, and begin, before the actual chunk data that we have to trim out
-            let mut chunk_data = self.read_peer_message();
+            let mut chunk_data = self.read_peer_message().unwrap();
             // Drain the first 8 bytes
             let block: Vec<u8> = chunk_data.payload.drain(8..).into_iter().collect();
-            println!("Downloaded Chunk: {}", chunk_offset / chunk_size);
             Some(block)
         }
         else {
@@ -211,12 +214,14 @@ impl PeerDownloader {
             if final_chunk_size > chunk_size {
                 final_chunk_size = chunk_size;
             }
+            println!("Downloading Chunk: {}", i);
             if let Some(mut chunk_data) = self.download_chunk(piece_index, starting_offset, final_chunk_size as u32) {
                 // Update downloaded_bytes
                 downloaded_bytes += chunk_data.len();
                 // Store the payload data into our final vector
                 piece_data.append(&mut chunk_data);
 
+                println!("Downloaded Chunk: {}", i);
             }
             // Sending request failed
             else {

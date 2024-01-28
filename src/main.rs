@@ -127,6 +127,23 @@ async fn main() {
     let cmd = Command::new("rTorrent")
         .bin_name("rTorrent")
         .subcommand_required(true)
+        .subcommand(Command::new("decode")
+            .about("Decode bencode string")
+            .arg(arg!(<BENCODEDSTRING>))
+        )
+        .subcommand(Command::new("info")
+            .about("Parse Torrent File")
+            .arg(arg!(<TORRENTFILE>))
+        )
+        .subcommand(Command::new("peers")
+            .about("Get Peer Info from Tracker")
+            .arg(arg!(<TORRENTFILE>))
+        )
+        .subcommand(Command::new("handshake")
+            .about("Get Peer Info from Tracker")
+            .arg(arg!(<TORRENTFILE>))
+            .arg(arg!(<PEERSOCKET>))
+        )
         .subcommand(Command::new("download_piece")
             .about("Download one specific piece of a file")
             .args(&[
@@ -139,11 +156,78 @@ async fn main() {
                 arg!(<torrentfile> "Torrent File to Read"),
                 arg!(<piecenum> "Which Piece Number to Download")
             ])
-    );
+        );
 
     let matches = cmd.get_matches();
 
     match matches.subcommand_name() {
+        Some("decode") => {
+            let cmd = matches.subcommand_matches("decode").unwrap();
+            let encoded_val: &String = cmd.get_one::<String>("BENCODEDSTRING").expect("Need bencoded string as arg");
+            let decoded_value = decode_bencoded_input(encoded_val).0;
+            println!("{}", decoded_value.to_string());
+
+        },
+        Some("info") => {
+            let cmd = matches.subcommand_matches("info").unwrap();
+            let torrent_file_path: &String = cmd.get_one::<String>("TORRENTFILE").expect("Need path to torrentfile");
+            let torrent_data = read_torrent_file(PathBuf::from(torrent_file_path.as_str()).as_path());
+            let mut torrent_data: Torrent =
+                match torrent_data {
+                    Ok(buf) => {
+                        match de::from_bytes::<Torrent>(&buf) {
+                            Ok(t) => t, //torrent_data = t,
+                            Err(e) => panic!("{}", e)
+                        }
+                    }
+                    Err(e) => panic!("{}", e)
+                };
+            println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.clone().unwrap(), torrent_data.info.length, torrent_data.info.print_info_hash_hex());
+            println!("Piece Length: {}", torrent_data.info.piece_length);
+            println!("Piece Hashes:");
+            for i in torrent_data.info.print_piece_hashes() {
+                println!("{}", i);
+            }
+        },
+        Some("peers") => {
+            let cmd = matches.subcommand_matches("peers").unwrap();
+            let torrent_file_path: &String = cmd.get_one::<String>("TORRENTFILE").expect("Need path to torrentfile");
+            let torrent_file_data = read_torrent_file(PathBuf::from(torrent_file_path.as_str()).as_path());
+            let mut torrent_data: Torrent =
+                match torrent_file_data {
+                    Ok(buf) => {
+                        match de::from_bytes::<Torrent>(&buf) {
+                            Ok(t) => t, //torrent_data = t,
+                            Err(e) => panic!("{}", e)
+                        }
+                    }
+                    Err(e) => panic!("{}", e)
+                };
+            let bin_data = torrent_data.get_tracker_info().await.unwrap().bytes().await.unwrap();
+            let decoded_data: TrackerResponse = serde_bencode::from_bytes(bin_data.as_ref()).unwrap();
+            for ip in decoded_data.get_peers() {
+                println!("{}", ip);
+            }
+        },
+        Some("handshake") => {
+            let cmd = matches.subcommand_matches("handshake").unwrap();
+            let torrent_file_path: &String = cmd.get_one::<String>("TORRENTFILE").expect("Need path to torrentfile");
+            let peer_socket: &String = cmd.get_one::<String>("PEERSOCKET").expect("Need socket addr:port for peer");
+            let torrent_file_data = read_torrent_file(PathBuf::from(torrent_file_path.as_str()).as_path());
+            let mut torrent_data: Torrent =
+                match torrent_file_data {
+                    Ok(buf) => {
+                        match de::from_bytes::<Torrent>(&buf) {
+                            Ok(t) => t, //torrent_data = t,
+                            Err(e) => panic!("{}", e)
+                        }
+                    }
+                    Err(e) => panic!("{}", e)
+            };
+            let mut dl_helper: PeerDownloader =
+                PeerDownloader::new(peer_socket.as_str(), torrent_data.info.piece_length as usize);
+            dl_helper.handshake(&torrent_data);
+        },
         // If the command is download_piece
         Some("download_piece") => {
             let dl = matches.subcommand_matches("download_piece").unwrap();
@@ -178,108 +262,30 @@ async fn main() {
                 let unchoke_message = dl_helper.read_peer_message();
                 // Once the unchoke message is received we can start requesting data
                 dl_helper.peer_status = downloads::PeerStatus::PeerInterested;
-                println!("{}", unchoke_message.message_id as u8);
-                // Download 16k chunks (16384 bytes)
-                let piece = dl_helper.download_piece(piecenum, torrent_data.info.piece_length as usize, 16384);
-                println!("Downloaded piece of length: {}", piece.len());
+                // If we're downloading the very last piece we need a smaller piece size than usual
+                // So we calculate here if we're getting the last piece and update piece size accordingly
+                if (piecenum+1) as i64 * torrent_data.info.piece_length <= torrent_data.info.length {
+                    // Download 16k chunks (16384 bytes)
+                    let piece = 
+                        dl_helper.download_piece(piecenum, torrent_data.info.piece_length as usize, 16384);
+                    println!("Wrote piece {} to file: {} (Size {})",
+                        piecenum, output, write_piece_to_file(output, &piece).unwrap());
+                }
+                else {
+                    let new_piece_size = torrent_data.info.length - torrent_data.info.piece_length * (piecenum) as i64;
+                    // Download 16k chunks (16384 bytes)
+                    let piece = 
+                        dl_helper.download_piece(piecenum, new_piece_size as usize, 16384);
+                    println!("Wrote piece {} to file: {} (Size {})",
+                        piecenum, output, write_piece_to_file(output, &piece).unwrap());
+                }
 
-                println!("Wrote piece {} to file: {} (Size {})",
-                    piecenum, output, write_piece_to_file(output, &piece).unwrap());
             }
             else {
                 println!("Failed to Read Torrent File");
             }
-        }
+        },
+
         _ => ()
     }
-
-    // let args: Vec<String> = env::args().collect();
-    // let command = &args[1];
-
-    // if command == "decode" {
-    //    // Uncomment this block to pass the first stage
-    //    let encoded_value = &args[2];
-    //    let decoded_value = decode_bencoded_input(encoded_value).0;
-    //    println!("{}", decoded_value.to_string());
-    // }
-    // else if command == "info" {
-    //     let torrent_file_path = PathBuf::from(&args[2]);
-    //     let torrent_data = read_torrent_file(torrent_file_path.as_path());
-    //     let mut torrent_data: Torrent =
-    //         match torrent_data {
-    //             Ok(buf) => {
-    //                 match de::from_bytes::<Torrent>(&buf) {
-    //                     Ok(t) => t, //torrent_data = t,
-    //                     Err(e) => panic!("{}", e)
-    //                 }
-    //             }
-    //             Err(e) => panic!("{}", e)
-    //         };
-    //     println!("Tracker URL: {}\nLength: {}\nInfo Hash: {}", torrent_data.announce.clone().unwrap(), torrent_data.info.length, torrent_data.info.print_info_hash_hex());
-    //     println!("Piece Length: {}", torrent_data.info.piece_length);
-    //     println!("Piece Hashes:");
-    //     for i in torrent_data.info.print_piece_hashes() {
-    //         println!("{}", i);
-    //     }
-    // }
-    // else if command == "peers" {
-    //    // Uncomment this block to pass the first stage
-    //     let torrent_file_path = PathBuf::from(&args[2]);
-    //     let torrent_data = read_torrent_file(torrent_file_path.as_path());
-    //     let mut torrent_data: Torrent =
-    //         match torrent_data {
-    //             Ok(buf) => {
-    //                 match de::from_bytes::<Torrent>(&buf) {
-    //                     Ok(t) => t, //torrent_data = t,
-    //                     Err(e) => panic!("{}", e)
-    //                 }
-    //             }
-    //             Err(e) => panic!("{}", e)
-    //         };
-    //     let bin_data = torrent_data.get_tracker_info().await.unwrap().bytes().await.unwrap();
-    //     let decoded_data: TrackerResponse = serde_bencode::from_bytes(bin_data.as_ref()).unwrap();
-    //     for ip in decoded_data.get_peers() {
-    //         println!("{}", ip);
-    //     }
-    // }
-    // else if command == "handshake" {
-    //     let torrent_file_path = PathBuf::from(&args[2]);
-    //     let torrent_data = read_torrent_file(torrent_file_path.as_path());
-    //     let mut torrent_data: Torrent =
-    //         match torrent_data {
-    //             Ok(buf) => {
-    //                 match serde_bencode::de::from_bytes::<Torrent>(&buf) {
-    //                     Ok(t) => t, //torrent_data = t,
-    //                     Err(e) => panic!("{}", e)
-    //                 }
-    //             }
-    //             Err(e) => panic!("{}", e)
-    //         };
-    //     let socket_str = &args[3];
-    //     let socket_obj = SocketAddrV4::from_str(&socket_str.as_str());
-    //     match socket_obj {
-    //         Ok(sock) => {
-    //             let info_hash = torrent_data.info.calculate_sha1_hash().1;
-    //             let byte_array: [u8; 20] = {
-    //                 let mut arr = [0; 20]; // Initialize an array of zeros
-    //                 arr.copy_from_slice(&info_hash.as_slice()[..20]); // Copy data from slice to array
-    //                 arr
-    //             };
-    //             let handshake_msg: HandshakeMessage = HandshakeMessage::new(byte_array);
-    //             // Create the TCP Stream
-    //             let mut stream = TcpStream::connect(sock).expect(format!("Could Not Initiate Connection to {:?}", sock).as_str());
-    //             stream.write_all(&handshake_msg.get_message_bytes());
-
-    //             let mut response_container: [u8; 68] = [0; 68];
-    //             stream.read_exact(&mut response_container);
-
-    //             let peer_id = response_container[48..68].to_owned();
-    //             println!("Peer ID: {}", hex::encode(peer_id))
-    //         },
-    //         Err(e) => println!("{:?}", e)
-    //     };
-    // }
-    // else {
-    //    println!("unknown command: {}", args[1])
-    // }
 }
