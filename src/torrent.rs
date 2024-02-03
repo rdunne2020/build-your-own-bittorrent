@@ -58,7 +58,7 @@ impl TorrentInfo {
         hex::encode(result)
     }
 
-    pub fn print_piece_hashes(&self) -> Vec<String>{
+    pub fn return_piece_hashes(&self) -> Vec<String>{
         // Each hash is 20 bytes
         let hash_string_size = 20;
         let bytes = self.pieces.to_vec();
