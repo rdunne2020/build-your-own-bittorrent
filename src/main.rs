@@ -1,36 +1,66 @@
 #![allow(unused)]
-
-mod torrent;
-use torrent::Torrent;
-
-mod tracker;
-use tracker::{TrackerResponse,HandshakeMessage};
-
-mod downloads;
-use downloads::{PeerDownloader,PeerMessage, Piece};
+use bittorrent_starter_rust::torrent::Torrent;
+use bittorrent_starter_rust::tracker::{TrackerResponse,HandshakeMessage};
+use bittorrent_starter_rust::downloads::{MessageId,DownloaderStatus,PeerStatus,PeerDownloader,PeerMessage, Piece};
 
 use serde_json;
 use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use serde::{Deserialize, Serialize};
-use std::env;
 use std::path::{Path, PathBuf};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::net::{SocketAddrV4, TcpStream};
 use std::str::FromStr;
-use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{SystemTime, Instant, UNIX_EPOCH};
 use std::cell::RefCell;
 use clap::{arg, Parser, Arg, Command};
 use tokio::time::{sleep, Duration};
-use sha1::{Digest, Sha1};
 
 fn write_piece_to_file(path: &String, piece_data: &Piece) -> std::io::Result<u32> {
     let mut piece_file_io: File = File::create(path)?;
     piece_file_io.write_all(&piece_data.payload)?;
     Ok(piece_data.payload.len() as u32)
+}
+
+fn write_pieces_to_file(output_path: &Path, pieces: &Vec<(Piece, Option<String>)>) -> std::io::Result<usize> {
+    let mut downloaded_file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(output_path)?;
+    let mut written_bytes = 0;
+    for p in pieces {
+        written_bytes += downloaded_file.write(&p.0.payload)?;
+    }
+    Ok(written_bytes)
+}
+
+
+fn read_torrent_file(path: &Path) -> io::Result<Vec<u8>> {
+    let mut file = File::open(path)?;
+
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+    Ok(contents)
+}
+
+fn merge_tmp_files(output_path: &Path, tmp_files: &Vec<String>) -> std::io::Result<usize> {
+    let mut downloaded_file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(output_path)?;
+    let mut written_bytes: usize = 0;
+    for t in tmp_files {
+        let mut file = OpenOptions::new().read(true).open(t.as_str())?;
+        let mut contents: Vec<u8> = Vec::new();
+        file.read_to_end(&mut contents);
+        written_bytes += downloaded_file.write(&contents)?;
+        // Close the file stream so we can remove the file from the tmp directory
+        drop(file);
+        std::fs::remove_file(t.as_str());
+    }
+    Ok(written_bytes)
 }
 
 fn decode_bencoded_input(encoded_value: &str) -> (serde_json::Value, &str) {
@@ -94,33 +124,6 @@ fn decode_bencoded_input(encoded_value: &str) -> (serde_json::Value, &str) {
     panic!("Unhandled encoded value: {}", encoded_value)
 }
 
-fn read_torrent_file(path: &Path) -> io::Result<Vec<u8>> {
-    let mut file = File::open(path)?;
-
-    let mut contents = Vec::new();
-    file.read_to_end(&mut contents)?;
-    Ok(contents)
-}
-
-fn merge_tmp_files(output_path: &Path, tmp_files: &Vec<String>) -> std::io::Result<usize> {
-    let mut downloaded_file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(output_path)?;
-    let mut written_bytes: usize = 0;
-    for t in tmp_files {
-        let mut file = OpenOptions::new().read(true).open(t.as_str())?;
-        let mut contents: Vec<u8> = Vec::new();
-        file.read_to_end(&mut contents);
-        written_bytes += downloaded_file.write(&contents)?;
-        // Close the file stream so we can remove the file from the tmp directory
-        drop(file);
-        std::fs::remove_file(t.as_str());
-    }
-    Ok(written_bytes)
-}
-
-// Usage: your_bittorrent.sh decode "<encoded_value>"
 #[tokio::main]
 async fn main() ->Result<(), std::io::Error>{
 
@@ -274,31 +277,31 @@ async fn main() ->Result<(), std::io::Error>{
 
                 let interested_message: PeerMessage = PeerMessage {
                     length: 1,
-                    message_id: downloads::MessageId::from(2),
+                    message_id: MessageId::from(2),
                     payload: vec![]
                 };
                 // Unchoke downloader
-                dl_helper.downloader_status = downloads::DownloaderStatus::DownloaderInterested;
+                dl_helper.downloader_status = DownloaderStatus::DownloaderInterested;
                 // Send Interested Message
                 dl_helper.send_peer_message(&interested_message);
 
                 let unchoke_message = dl_helper.read_peer_message();
                 // Once the unchoke message is received we can start requesting data
-                dl_helper.peer_status = downloads::PeerStatus::PeerInterested;
+                dl_helper.peer_status = PeerStatus::PeerInterested;
                 // If we're downloading the very last piece we need a smaller piece size than usual
                 // So we calculate here if we're getting the last piece and update piece size accordingly
                 if (piecenum+1) as i64 * torrent_data.info.piece_length <= torrent_data.info.length {
                     // Download 16k chunks (16384 bytes)
-                    let piece = 
-                        dl_helper.download_piece(piecenum, torrent_data.info.piece_length as usize, 16384)?;
+                    let mut piece = Piece::new(piecenum as usize, torrent_data.info.length as usize);
+                    dl_helper.download_piece(&mut piece, 16384)?;
                     println!("Wrote piece {} to file: {} (Size {})",
                         piecenum, output, write_piece_to_file(output, &piece).unwrap());
                 }
                 else {
                     let new_piece_size = torrent_data.info.length - torrent_data.info.piece_length * (piecenum) as i64;
                     // Download 16k chunks (16384 bytes)
-                    let piece = 
-                        dl_helper.download_piece(piecenum, new_piece_size as usize, 16384)?;
+                    let mut piece = Piece::new(piecenum as usize, new_piece_size as usize);
+                    dl_helper.download_piece(&mut piece, 16384)?;
                     println!("Wrote piece {} to file: {} (Size {})",
                         piecenum, output, write_piece_to_file(output, &piece).unwrap());
                 }
@@ -309,6 +312,8 @@ async fn main() ->Result<(), std::io::Error>{
             }
         },
         Some("download") => {
+            // TODO: Take the total download size and chunk it into buffers of default 64M or user set size
+            // Store pieces in their buffers and only write at the end or when one fills, then append all together at the end
             const CHUNK_SIZE:usize = 16384;
             let dl = matches.subcommand_matches("download").unwrap();
             let torrentfile: &String = dl.get_one::<String>("torrentfile")
@@ -342,8 +347,7 @@ async fn main() ->Result<(), std::io::Error>{
             let decoded_tracker_data: TrackerResponse = serde_bencode::from_bytes(&binary_tracker_info.as_ref()).unwrap();
             let peers: &Vec<String> = &decoded_tracker_data.get_peers();
             let mut valid_peer_downloaders: Vec<Rc<RefCell<PeerDownloader>>> = Vec::new();
-            // Make connection with each peer, keep each open until the file is done downloading
-            // If the connection to one fails, just keep moving
+            // Make connection with each peer, keep each open until the file is done downloading or an error happens
             print!("Connecting to Peers...");
             for p in peers {
                 let mut download_client = PeerDownloader::new(p.as_str());
@@ -357,23 +361,21 @@ async fn main() ->Result<(), std::io::Error>{
                         let bitfield_message = dl.read_peer_message();
                         let interested_message: PeerMessage = PeerMessage {
                             length: 1,
-                            message_id: downloads::MessageId::from(2),
+                            message_id: MessageId::from(2),
                             payload: vec![]
                         };
-                        // Unchoke downloader
-                        dl.downloader_status = downloads::DownloaderStatus::DownloaderInterested;
-                        // Send Interested Message
+                        // Unchoke downloader and notify peer that we're interested
+                        dl.downloader_status = DownloaderStatus::DownloaderInterested;
                         dl.send_peer_message(&interested_message);
 
                         // Once the unchoke message is received we can start requesting data
-                        // It can time out, in that case we know we are choked
                         if let Ok(unchoke_message) = dl.read_peer_message() {
-                            if unchoke_message.message_id == downloads::MessageId::Unchoke {
-                                dl.peer_status = downloads::PeerStatus::PeerInterested;
+                            if unchoke_message.message_id == MessageId::Unchoke {
+                                dl.peer_status = PeerStatus::PeerInterested;
                             }
                         }
                         else {
-                            dl.peer_status = downloads::PeerStatus::PeerChoking;
+                            dl.peer_status = PeerStatus::PeerChoking;
                         }
 
                         valid_peer_downloaders.push(Rc::new(RefCell::new(dl)));
@@ -389,59 +391,55 @@ async fn main() ->Result<(), std::io::Error>{
             if valid_peer_downloaders.len() < 1 {
                 panic!("FATAL: Could Not Connect to any available peers, please check network connection and try again");
             }
-            // TODO: This is insanity, should just have a vector of piece indices, then we pop and push them
-            // Create a queue of pieces to request that can grow/shrink in size
-            // It will store tuples of variant (usize, String, &mut PeerDownloader, Option<String>) that will keep
-            // piece length, piece_index, piece hash, the download helper for the peer, and an option representing whether or not it successfully downloaded
-            let mut piece_requests: VecDeque<(usize, usize, String, Rc<RefCell<PeerDownloader>>, Option<String>)> = VecDeque::new();
             let piece_hashes = torrent_data.info.return_piece_hashes();
+            let num_pieces = piece_hashes.len();
+            // This queue is a tuple storing the piece data and whether or not it's been downloaded
+            let mut pieces_to_download: Vec<(Piece,Option<String>)> = Vec::with_capacity(num_pieces);
             for (idx, hash) in piece_hashes.iter().enumerate() {
                 // If you're downloading the last piece and file size isn't divisible by piece size, you have to download a smaller piece
-                let mut piece_size = torrent_data.info.piece_length;
+                let mut piece_size: i64 = torrent_data.info.piece_length;
                 if idx == piece_hashes.len()-1 && torrent_data.info.length % torrent_data.info.piece_length > 0 {
                     // The updated piece size is the length of the file minus the amount downloaded
-                    // This isn't working
                     piece_size = torrent_data.info.length - torrent_data.info.piece_length * (idx) as i64;
                 }
-                // Arbitrarily choose which connection to download from
-                let dl_client_ptr =
-                    Rc::clone(valid_peer_downloaders.get(idx % valid_peer_downloaders.len()).unwrap());
-                let mut piece_encapsulation =
-                    (piece_size as usize, idx, hash.clone(), dl_client_ptr, None::<String>);
-                piece_requests.push_back(piece_encapsulation);
+                let mut piece_data: Piece = Piece::new(idx, piece_size as usize);
+                piece_data.hash = hash.clone();
+                pieces_to_download.push((piece_data, None::<String>));
             }
+            // Management Loop
             let mut tmp_file_paths: Vec<String> = Vec::new();
             let mut index: usize = 0;
-            let num_pieces: usize = piece_requests.len();
-            // Management Loop
-            // While there are any pieces that have not been downloaded keep looping
             let start = Instant::now();
-            while piece_requests.iter().any(|a| a.4.is_none()) {
-                let mut piece_info = piece_requests.get_mut(index).unwrap();
+            // While there are any pieces that have not been downloaded keep looping
+            while pieces_to_download.iter().any(|a| a.1.is_none()) {
+                let mut piece_info = pieces_to_download.get_mut(index % num_pieces).unwrap();
                 // The current piece has already been downloaded skip it
-                if piece_info.4.is_some() {
+                if piece_info.1.is_some() {
                     index += 1;
-                    if index >= num_pieces {
-                        index = 0;
-                    }
                     continue;
                 }
-                let mut downloader = piece_info.3.borrow_mut();
-                match downloader.download_piece(piece_info.1 as u32, piece_info.0, CHUNK_SIZE) {
+                // In theory this is picked by an algorithmic choice for rare pieces and other things
+                // But for now everytime we see a piece we try to download it with a new peer
+                let mut peer_connection = valid_peer_downloaders
+                    .get(index % valid_peer_downloaders.len())
+                    .unwrap()
+                    .borrow_mut();
+                match peer_connection.download_piece(&mut piece_info.0, CHUNK_SIZE) {
                     // The piece download was successful, check hash and make sure data is valid, then write it to a tmp file
                     Ok(piece) => {
                         // Verify the hash is correct before saving the file
-                        if &piece.hash == piece_hashes.get(index).unwrap() {
+                        if &piece_info.0.hash == piece_hashes.get(index % num_pieces).unwrap() {
                             // Store the tmp file path that we're writing the piece to into the vector
-                            let tmp_path = format!("/tmp/file.{}", index);
+                            // let tmp_path = format!("/tmp/file.{}", index % num_pieces);
                             // Load the path we're writing to into the Option stored in the piece tuple so that we know it's done
-                            piece_info.4 = Some(tmp_path.clone());
-                            write_piece_to_file(&tmp_path, &piece);
-                            tmp_file_paths.push(tmp_path);
+                            // piece_info.1 = Some(tmp_path.clone());
+                            piece_info.1 = Some(String::from("Downloaded Piece"));
+                            // write_piece_to_file(&tmp_path, &piece_info.0);
+                            // tmp_file_paths.push(tmp_path);
                         }
                         else {
-                            // TODO: Download this piece from another peer now
-                            println!("Hash for piece {} is incorrect, {} != {}", index, piece.hash, piece_hashes.get(index).unwrap());
+                            println!("Hash for piece {} is incorrect, {} != {}",
+                                index % num_pieces, piece_info.0.hash, piece_hashes.get(index % num_pieces).unwrap());
                         }
                     }
                     Err(e) => {
@@ -462,7 +460,8 @@ async fn main() ->Result<(), std::io::Error>{
             println!("The time it took to download file was: {:?}", duration);
 
             // Now that we've downloaded all the pieces, merge them and we're done
-            println!("Completed file: {} of size: {} bytes!", downloaded_file_name, merge_tmp_files(download_path.as_path(), &tmp_file_paths)?);
+            // println!("Completed file: {} of size: {} bytes!", downloaded_file_name, merge_tmp_files(download_path.as_path(), &tmp_file_paths)?);
+            println!("Completed file: {} of size: {} bytes!", downloaded_file_name, write_pieces_to_file(download_path.as_path(), &pieces_to_download)?);
         },
         _ => ()
     }
