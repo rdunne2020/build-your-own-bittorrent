@@ -1,6 +1,4 @@
-use serde_bencode::de;
-use serde_bytes::ByteBuf;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::net::Ipv4Addr;
 
 #[derive(Debug, Deserialize)]

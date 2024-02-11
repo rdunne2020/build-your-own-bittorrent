@@ -1,4 +1,3 @@
-use serde_bencode::de;
 use serde_bytes::ByteBuf;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -53,8 +52,6 @@ impl TorrentInfo {
         hash.update(serde_bencode::to_bytes(self).unwrap());
         let result = hash.finalize();
 
-        let hashed_bytes: Vec<u8> = result.to_vec();
-
         hex::encode(result)
     }
 
@@ -98,7 +95,7 @@ impl Torrent {
     }
     // Function to request tracker data
     pub async fn get_tracker_info(&self) -> Option<Response> {
-        let num_pieces = (self.info.pieces.to_vec().len() / 20);
+        let num_pieces = self.info.pieces.to_vec().len() / 20;
         let tracker_url = self.announce.clone().unwrap();
         let info_hash = self.info.calculate_sha1_hash();
         let mut param_map = HashMap::new();
