@@ -1,3 +1,5 @@
+use tokio::join;
+
 use super::torrent::Torrent;
 
 use super::tracker::HandshakeMessage;
@@ -7,6 +9,15 @@ use std::io::{Write, Read};
 use std::str::FromStr;
 use std::io::{Error, ErrorKind};
 use std::convert::From;
+use sha1::{Digest, Sha1};
+
+pub fn calculate_piece_hash(bytes: &Vec<u8>) -> String {
+    let mut hash = Sha1::new();
+    hash.update(bytes);
+    let hashed_bytes: Vec<u8> = hash.finalize().to_vec();
+    let piece_hash: String = hex::encode(hashed_bytes);
+    piece_hash
+}
 
 #[repr(u8)]
 #[derive(Copy, Clone, PartialEq)]
@@ -77,8 +88,26 @@ pub enum DownloaderStatus {
     DownloaderInterested
 }
 
+pub struct Piece {
+    pub index: usize,
+    pub length: usize,
+    pub hash: String,
+    pub payload: Vec<u8>
+}
+
+impl Piece {
+    fn new(idx: usize, len: usize) -> Self {
+        Piece {
+            index: idx,
+            length: len,
+            hash: String::new(),
+            payload: Vec::with_capacity(len)
+        }
+    }
+}
+
 pub struct PeerDownloader {
-    tcp_stream: TcpStream,
+    pub tcp_stream: TcpStream,
     pub peer_status: PeerStatus,
     pub downloader_status: DownloaderStatus,
 }
@@ -86,7 +115,7 @@ pub struct PeerDownloader {
 impl PeerDownloader {
     pub fn new(socket_addr: &str) -> std::io::Result<Self> {
         let socket_address = SocketAddrV4::from_str(socket_addr).unwrap();
-        println!("{:?}", socket_address);
+        // println!("{:?}", socket_address);
         Ok(PeerDownloader {
             tcp_stream: TcpStream::connect(socket_address)
                 .expect(format!("Could Not Initiate Connection to {:?}", socket_addr).as_str()),
@@ -105,13 +134,13 @@ impl PeerDownloader {
         };
         let handshake_msg: HandshakeMessage = HandshakeMessage::new(byte_array);
         // Create the TCP Stream
-        self.tcp_stream.write_all(&handshake_msg.get_message_bytes());
+        self.tcp_stream.write(&handshake_msg.get_message_bytes());
 
         let mut response_container: [u8; 68] = [0; 68];
         self.tcp_stream.read_exact(&mut response_container);
 
         let peer_id = response_container[48..68].to_owned();
-        println!("Peer ID: {}", hex::encode(peer_id))
+        // println!("Peer ID: {}", hex::encode(peer_id))
     }
 
     pub fn read_peer_message(&mut self) -> Result<PeerMessage,std::io::Error>{
@@ -148,8 +177,13 @@ impl PeerDownloader {
         let mut msg_bytes: Vec<u8> = peer_msg.get_message_bytes();
         let message_length: usize = msg_bytes.len();
         // Send Message
-        if let Ok(()) = self.tcp_stream.write_all(&mut msg_bytes) {
-            return Ok(message_length);
+        if let Ok(b) = self.tcp_stream.write(&mut msg_bytes) {
+            if message_length == b {
+                return Ok(message_length);
+            }
+            else {
+                return Err(std::io::Error::new(ErrorKind::WriteZero, "Did not write entire message to socket"));
+            }
         }
         else {
             return Err(std::io::Error::new(ErrorKind::WriteZero, "Write to socket failed"));
@@ -173,8 +207,8 @@ impl PeerDownloader {
         request_message_byte_array= PeerMessage::new(REQUEST_MSG_LEN, REQUEST_MSG_ID, &request_payload).get_message_bytes();
 
         // if let Ok(()) = self.tcp_stream.write_all(&mut request_message_byte_array) {
-        match self.tcp_stream.write_all(&mut request_message_byte_array) {
-            Ok(()) => {
+        match self.tcp_stream.write(&mut request_message_byte_array) {
+            Ok(b) => {
                 // The piece payload has 2 u32 values: index, and begin, before the actual chunk data that we have to trim out
                 let mut chunk_data = self.read_peer_message().unwrap();
                 // Drain the first 8 bytes
@@ -188,7 +222,7 @@ impl PeerDownloader {
     }
 
     // TODO: Pipeline this (async)
-    pub fn download_piece(&mut self, piece_index: u32, piece_size: usize, chunk_size: usize) -> Result<Vec<u8>, std::io::Error> {
+    pub fn download_piece(&mut self, piece_index: u32, piece_size: usize, chunk_size: usize) -> Result<Piece, std::io::Error> {
         // Calculate how many chunks we have to download
         let mut total_chunks: usize = piece_size / chunk_size;
         // If chunk size doesn't directly divide into piece size, download an extra chunk of a shorter size
@@ -196,16 +230,15 @@ impl PeerDownloader {
             total_chunks += 1;
         }
 
-        let mut piece_data: Vec<u8> = Vec::new();
-        let mut downloaded_bytes: usize = 0;
+        let mut piece_obj: Piece = Piece::new(piece_index as usize, piece_size);
         let mut final_chunk_size:usize = usize::MAX;
         for i in 0..total_chunks {
             let starting_offset: u32 = i as u32 * chunk_size as u32;
             // Make sure you still have enough data in the piece to download a whole chunk by checking to see
             // if the next full chunk size is bigger than number of bytes available
-            if downloaded_bytes + chunk_size > piece_size {
-                // final_chunk_size = (chunk_size - (piece_size - downloaded_bytes));
-                final_chunk_size = (piece_size - downloaded_bytes);
+            // if downloaded_bytes + chunk_size > piece_size {
+            if (i+1)*chunk_size > piece_size {
+                final_chunk_size = (piece_size - (i*chunk_size));
             }
 
             // If we're not downloading the last chunk, final chunk size will be usize max
@@ -213,14 +246,11 @@ impl PeerDownloader {
             if final_chunk_size > chunk_size {
                 final_chunk_size = chunk_size;
             }
-            // if let Ok(mut chunk_data) = self.download_chunk(piece_index, starting_offset, final_chunk_size as u32) {
-            let mut chunk_data = self.download_chunk(piece_index, starting_offset, final_chunk_size as u32)?;
-            // Update downloaded_bytes
-            downloaded_bytes += chunk_data.len();
-            // Store the payload data into our final vector
-            piece_data.append(&mut chunk_data);
-
+            //let mut chunk_data = self.download_chunk(piece_index, starting_offset, final_chunk_size as u32)?;
+            piece_obj.payload.append(&mut self.download_chunk(piece_index, starting_offset, final_chunk_size as u32)?);
         }
-        Ok(piece_data)
+        let hash = calculate_piece_hash(&piece_obj.payload);
+        piece_obj.hash = hash;
+        Ok(piece_obj)
     }
 }
