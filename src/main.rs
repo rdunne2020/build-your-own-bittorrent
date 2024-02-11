@@ -36,7 +36,6 @@ fn write_pieces_to_file(output_path: &Path, pieces: &Vec<(Piece, Option<String>)
     Ok(written_bytes)
 }
 
-
 fn read_torrent_file(path: &Path) -> io::Result<Vec<u8>> {
     let mut file = File::open(path)?;
 
@@ -150,7 +149,6 @@ async fn main() ->Result<(), std::io::Error>{
         .subcommand(Command::new("download_piece")
             .about("Download one specific piece of a file")
             .args(&[
-                //arg!(-o <OUTPUT> "File to save the piece to"),
                 Arg::new("output_file")
                 .required(true)
                 .short('o')
@@ -160,7 +158,6 @@ async fn main() ->Result<(), std::io::Error>{
                 arg!(<piecenum> "Which Piece Number to Download")
             ])
         )
-        // TODO: We should get the filename from the torrent, so this should be optional
         .subcommand(Command::new("download")
             .about("Download the file")
             .args(&[
